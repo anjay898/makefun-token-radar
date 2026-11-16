@@ -1,28 +1,33 @@
-// FIELDNOTES Token Radar — model radar-2.
+// FIELDNOTES Token Radar — model radar-3.
 //
 // One sealed DefiLlama snapshot in, one ranked board out. The board covers every slug in the
-// snapshot's watchlist (the floor, never a ceiling) and adds early pre-token protocols below the
-// floor that the radar exists to find. A protocol is pre-token when its record carries no token
+// snapshot's watchlist (the floor, never a ceiling) and adds early pre-token protocols the
+// watchlist does not name — most below the floor, a few set aside by the watchlist rule itself. A protocol is pre-token when its record carries no token
 // (no market cap, no CoinGecko id, no symbol); tokenized protocols are calibrated against, never
 // ranked, and are shown apart with the market's own values.
 //
 // The implied value is a circulating-cap proxy learned from the snapshot itself, not a fixed
-// multiple and never a hardcoded name:
+// multiple and never a hardcoded name. Four factors, each traceable to a figure the snapshot
+// itself carries — its TVL, its seven-day growth, and how long it has run with no token:
 //
 //   peers      = tokenized protocols (mcap > 0, TVL >= $5M, non-derivative category)
 //   ratio      = mcap_usd / tvl_usd for each peer, kept inside [0.005, 100]
-//   catMult    = exp(shrunk median of log ratios): the category median log blended toward the
-//                global median log with weight w = peers / (peers + 12), clamped to [0.03, 8]
+//   anchor     = the category's peer multiple: exp of the category median log ratio blended
+//                toward the global median log with weight w = peers / (peers + 12), clamped to
+//                [0.03, 8]. A category with fewer than 4 peers has no anchor of its own: it is
+//                priced at the global multiple exactly, and the row says so.
 //   growthF    = exp(0.30 * log1p(clamp(change_7d, -60, 120) / 100))     (about 0.76x to 1.27x)
-//   maturityF  = 0.75 + 0.25 * min(age_days, 730) / 730                  (unknown age: 180 days)
-//   breadthF   = 1 + 0.025 * log2(clamp(chain count, 1, 8))
-//   dataF      = 0.95 ^ (missing growth + missing age + missing chains)
 //   spikeF     = 1 - 0.15 * clamp((change_7d - 60) / 120, 0, 1)          (unsustainable-spike haircut)
-//   implied    = max(1, round(tvl_usd * catMult * growthF * maturityF * breadthF * dataF * spikeF))
+//   maturityF  = 0.75 + 0.25 * log1p(min(age_days, 1825)) / log1p(1825)   (unknown age: 180 days)
+//   implied    = max(1, round(tvl_usd * anchor * growthF * spikeF * maturityF))
 //
-// Evidence is reported separately from value: high needs >= 12 category peers and no missing
-// inputs, medium needs >= 4 peers and at most one missing input, otherwise low. A peer dispersion
-// range (category quartiles through the same shrinkage) is shown per protocol, never as a promise.
+// What a record does not carry is reported, never priced in: each missing input (no growth
+// figure, no listing day, no chain) widens the peer dispersion range by a tenth on each side
+// instead of discounting the value, and lowers the evidence grade. Evidence is reported
+// separately from value: high needs >= 12 category peers and no missing inputs, medium needs
+// >= 4 peers and at most one missing input, otherwise low. The range itself is the category's
+// quartile multiples through the same shrinkage (the global quartiles when the category is
+// thin), shown per protocol, never as a promise.
 
 /** The snapshot's protocol entry: exactly the ten fields the sealed input carries. */
 export interface SnapshotProtocol {
@@ -48,7 +53,7 @@ export interface Snapshot {
 }
 
 /** The model's version label: the dashboard names it and the board carries it. */
-export const MODEL_VERSION = 'radar-2';
+export const MODEL_VERSION = 'radar-3';
 
 /** Total board size: the whole watchlist plus the early rows below. */
 export const BOARD_ROWS = 200;
@@ -103,14 +108,18 @@ export interface BoardRow {
   model: {
     category_multiple: number;
     category_peers: number;
+    /** 'category' when the category's own peers priced it, 'global' when too thin to price itself. */
+    anchor_source: 'category' | 'global';
     global_multiple: number;
     growth_factor: number;
     maturity_factor: number;
-    breadth_factor: number;
-    data_factor: number;
     spike_factor: number;
+    /** Inputs the record does not carry (growth, listing day, chains): they widen the range. */
+    missing_inputs: number;
   };
   farm_steps: string[];
+  /** The plan's totals in one line: capital, fees, hands-on time and holding period. */
+  farm_summary: string;
 }
 
 /** The dashboard's view of one row: everything the page renders, farm plan included. */
@@ -128,11 +137,14 @@ export interface LiveRow {
   ratio: number | null;
 }
 
-/** One category's calibration: how many peers priced it and what multiple they imply. */
+/** One category's calibration: how many peers priced it and what multiples they imply. */
 export interface CategoryStat {
   category: string;
   peers: number;
   multiple: number;
+  /** The shrunk quartile multiples: the dispersion a row in this category inherits. */
+  low: number;
+  high: number;
 }
 
 /** Everything the dashboard needs: the board, the live set, the calibration and the method. */
@@ -146,7 +158,18 @@ export interface RadarData {
   early_size: number;
   live_size: number;
   global_multiple: number;
+  /** The global peer quartiles: the range a thin category's rows inherit. */
+  global_low: number;
+  global_high: number;
   global_peers: number;
+  /** Every protocol in the snapshot accounted for: ranked, trading, set aside, or below the cut. */
+  accounting: {
+    snapshot_protocols: number;
+    ranked: number;
+    trading: number;
+    excluded_derivative: number;
+    below_cut: number;
+  };
   board_tvl_usd: number;
   median_implied_usd: number;
   categories: CategoryStat[];
@@ -277,12 +300,15 @@ export interface Scored {
   evidence: Evidence;
   multiple: number;
   peers: number;
+  anchorSource: 'category' | 'global';
   growthF: number;
   maturityF: number;
-  breadthF: number;
-  dataF: number;
   spikeF: number;
+  missing: number;
 }
+
+/** Peers a category needs before its own multiple, rather than the global one, prices a row. */
+const ANCHOR_MIN_PEERS = 4;
 
 /** Score one pre-token protocol under the calibration: the same function scores every row. */
 export function scoreProtocol(p: SnapshotProtocol, asOf: string, cal: Calibration): Scored {
@@ -291,36 +317,44 @@ export function scoreProtocol(p: SnapshotProtocol, asOf: string, cal: Calibratio
   const g = hasGrowth ? p.change_7d! : 0;
   const gClamped = clamp(g, -60, 120);
   const growthF = Math.exp(0.3 * Math.log1p(gClamped / 100));
-  const ageForModel = age ?? 180;
-  const maturityF = 0.75 + 0.25 * (Math.min(ageForModel, 730) / 730);
-  const chainCount = new Set(p.chains).size;
-  const breadthF = 1 + 0.025 * Math.log2(clamp(chainCount, 1, 8));
-  const missing = (hasGrowth ? 0 : 1) + (age === null ? 1 : 0) + (chainCount === 0 ? 1 : 0);
-  const dataF = Math.pow(0.95, missing);
   const spikeF = 1 - 0.15 * clamp((g - 60) / 120, 0, 1);
+  // Maturity rises on a log curve: most of the credit arrives in the first two tokenless years,
+  // and a protocol tracked five years with no token earns the last of it. No cliff, no cap jump.
+  const ageForModel = age ?? 180;
+  const maturityF = 0.75 + 0.25 * (Math.log1p(Math.min(ageForModel, 1825)) / Math.log1p(1825));
+  const chainCount = new Set(p.chains).size;
+  const missing = (hasGrowth ? 0 : 1) + (age === null ? 1 : 0) + (chainCount === 0 ? 1 : 0);
   const cat = p.category !== null ? cal.byCategory.get(p.category) : undefined;
-  const multiple = cat?.multiple ?? cal.globalMultiple;
   const peers = cat?.peers ?? 0;
-  // A category with fewer than 4 peers has no quartiles of its own: its dispersion range falls
-  // back to the global peer quartiles rather than collapsing onto the point estimate.
-  const lowMult = peers >= 4 ? cat!.low : cal.globalLow;
-  const highMult = peers >= 4 ? cat!.high : cal.globalHigh;
-  const rest = growthF * maturityF * breadthF * dataF * spikeF;
+  // A category with fewer than 4 peers cannot price its own rows: the global multiple anchors
+  // them exactly, and the row's anchor_source says so instead of hiding behind shrinkage.
+  const anchored = cat !== undefined && peers >= ANCHOR_MIN_PEERS;
+  const multiple = anchored ? cat!.multiple : cal.globalMultiple;
+  // The range is the anchor's own dispersion: the category's shrunk quartiles when it priced
+  // the row, the global quartiles when it could not. Each input the record does not carry
+  // widens the band a tenth on each side — uncertainty is shown, never priced into the value.
+  const lowMult = anchored ? cat!.low : cal.globalLow;
+  const highMult = anchored ? cat!.high : cal.globalHigh;
+  const widen = Math.pow(1.1, missing);
+  // The value is computed from the factors exactly as the row stores them (four decimals), so
+  // the dashboard's own recompute from those stored factors lands on the same dollar, not a
+  // rounding of a hidden precision the reader cannot see.
+  const rest = round4(growthF) * round4(spikeF) * round4(maturityF);
   const evidence: Evidence =
     peers >= 12 && missing === 0 ? 'high' : peers >= 4 && missing <= 1 ? 'medium' : 'low';
   return {
-    implied: Math.max(1, Math.round(p.tvl_usd * multiple * rest)),
-    low: Math.max(1, Math.round(p.tvl_usd * lowMult * rest)),
-    high: Math.max(1, Math.round(p.tvl_usd * highMult * rest)),
+    implied: Math.max(1, Math.round(p.tvl_usd * round4(multiple) * rest)),
+    low: Math.max(1, Math.round(p.tvl_usd * (lowMult / widen) * rest)),
+    high: Math.max(1, Math.round(p.tvl_usd * highMult * widen * rest)),
     age,
     evidence,
     multiple,
     peers,
+    anchorSource: anchored ? 'category' : 'global',
     growthF,
     maturityF,
-    breadthF,
-    dataF,
     spikeF,
+    missing,
   };
 }
 
@@ -433,23 +467,85 @@ function categorySteps(p: SnapshotProtocol, P: number, S: number, D: number): St
 }
 
 /**
- * A protocol's farm plan: six steps — wallet hygiene, four category steps with a cost and a time,
- * and a claim-safety step. Derived from the protocol's own record, never a hand-written name list.
- * Amounts are starting suggestions a reader edits, never a promise of eligibility or reward.
+ * The judgment step: what this protocol's own record says a farmer should do differently.
+ * Exactly one fires, in this order — falling TVL, a spike, youth, a thin category — and a
+ * protocol with no flag gets the steady-state instruction instead. Every figure in it is the
+ * protocol's own: its growth, its age, its category's peer count, its TVL.
  */
-export function farmSteps(p: SnapshotProtocol, age: number | null): string[] {
+function judgmentStep(p: SnapshotProtocol, age: number | null, peers: number, D: number): StepParts {
+  const g = p.change_7d;
+  const floor90 = Math.max(1, Math.round(p.tvl_usd * 0.9));
+  if (g !== null && g <= -10) {
+    return {
+      text: `Split the entry: ${p.name}'s TVL fell ${g.toFixed(2)}% in seven days, so place half now and the second half only if TVL still holds above $${floor90.toLocaleString('en-US')} at the day-${D} check.`,
+      cost: 'nothing extra; the second half stays in your wallet meanwhile',
+      time: `2 minutes at the day-${D} check`,
+    };
+  }
+  if (g !== null && g >= 60) {
+    return {
+      text: `Wait before entering: ${p.name}'s TVL spiked +${g.toFixed(2)}% in seven days, the pattern mercenary deposits make, so enter only if TVL is still above $${floor90.toLocaleString('en-US')} after ${D} days; the model already trimmed its value for the spike.`,
+      cost: 'nothing while you wait',
+      time: `${D} days of waiting, 2 minutes to check`,
+    };
+  }
+  if (age !== null && age < 90) {
+    return {
+      text: `Tranche the position: ${p.name} has been tracked only ${age} days, so put half in now and the second half ${D} days later, and only after the first half withdraws cleanly.`,
+      cost: 'one extra set of gas fees, about $0.50-$3',
+      time: `5 minutes now, 5 minutes at day ${D}`,
+    };
+  }
+  if (peers < ANCHOR_MIN_PEERS) {
+    const peerPhrase =
+      peers === 0
+        ? 'its category has no tokenized peers at all'
+        : `its category has only ${peers} tokenized peer${peers === 1 ? '' : 's'}`;
+    return {
+      text: `Size it as an early position, not a core one: ${peerPhrase}, so the global anchor prices ${p.name} and its range is wide; keep this farm small until the category prices itself.`,
+      cost: 'nothing; it caps the amounts in the other steps',
+      time: '1 minute to note the cap',
+    };
+  }
+  return {
+    text: `No flags in ${p.name}'s record — growth inside ±10% this week, ${peers} peers behind its category anchor, tracked ${age === null ? 'for an unrecorded span' : `${age} days`} with no token: run the plan as written and re-check TVL once at day ${D} before adding anything.`,
+    cost: 'nothing to re-check',
+    time: `2 minutes at day ${D}`,
+  };
+}
+
+/** The plan's totals in one line, from the same parameters the steps are built with. */
+export function farmSummary(p: SnapshotProtocol, age: number | null): string {
+  const P = principalFor(p, age);
+  const S = secondaryFor(p);
+  const hold = age !== null && age < 180 ? 45 : 30;
+  return (
+    `$${P + S} of working capital ($${P} in the position, $${S} for swaps and margin) · ` +
+    `about $2-$11 of gas and fees across the plan · roughly 35 minutes hands-on · ` +
+    `${hold} days of holding, with the exit tested before the full withdrawal`
+  );
+}
+
+/**
+ * A protocol's farm plan: six steps — the category's four working steps with a cost and a time,
+ * the judgment step its own record calls for, and a claim-safety step. Wallet hygiene is shared
+ * by every plan, so the page states it once above the steps instead of spending a step on it.
+ * Derived from the protocol's own record, never a hand-written name list. Amounts are starting
+ * suggestions a reader edits, never a promise of eligibility or reward.
+ */
+export function farmSteps(p: SnapshotProtocol, age: number | null, peers: number): string[] {
   const chain = chainOf(p);
   const P = principalFor(p, age);
   const S = secondaryFor(p);
   const D = observeDays(age);
   const hold = age !== null && age < 180 ? 45 : 30;
+  const [first, second, third, fourth] = categorySteps(p, P, S, D);
   const steps: StepParts[] = [
-    {
-      text: `Use a fresh wallet for ${p.name} that holds only the funds you plan to farm, and keep its seed phrase offline.`,
-      cost: 'under $3 of gas for the setup transactions',
-      time: '5 minutes',
-    },
-    ...categorySteps(p, P, S, D),
+    first!,
+    second!,
+    third!,
+    judgmentStep(p, age, peers, D),
+    fourth!,
     {
       text: `Hold the ${p.name} position for at least ${hold} days, then claim only from the points or rewards link the protocol itself publishes on ${chain}; never pay a third party to claim.`,
       cost: `the position's capital stays committed; no fee to check a claim`,
@@ -526,14 +622,15 @@ export function buildBoard(snapshot: Snapshot): BoardRow[] {
     model: {
       category_multiple: round4(s.multiple),
       category_peers: s.peers,
+      anchor_source: s.anchorSource,
       global_multiple: round4(cal.globalMultiple),
       growth_factor: round4(s.growthF),
       maturity_factor: round4(s.maturityF),
-      breadth_factor: round4(s.breadthF),
-      data_factor: round4(s.dataF),
       spike_factor: round4(s.spikeF),
+      missing_inputs: s.missing,
     },
-    farm_steps: farmSteps(p, s.age),
+    farm_steps: farmSteps(p, s.age, s.peers),
+    farm_summary: farmSummary(p, s.age),
   }));
 }
 
@@ -563,8 +660,21 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
   const early = board.filter((r) => r.stage === 'early').length;
   const impliedSorted = board.map((r) => r.implied_value_usd).sort((a, b) => a - b);
   const categories: CategoryStat[] = [...cal.byCategory.entries()]
-    .map(([category, v]) => ({ category, peers: v.peers, multiple: round4(v.multiple) }))
+    .map(([category, v]) => ({ category, peers: v.peers, multiple: round4(v.multiple), low: round4(v.low), high: round4(v.high) }))
     .sort((a, b) => b.peers - a.peers || (a.category < b.category ? -1 : 1));
+  // Account for every protocol in the snapshot, so the page can state the whole census:
+  // ranked here, already trading, set aside as a derivative or versioned product of a token
+  // that trades, or pre-token and rankable but below the board's 200-row cut.
+  const rankedSlugs = new Set(board.map((r) => r.slug));
+  let trading = 0;
+  let excludedDerivative = 0;
+  let belowCut = 0;
+  for (const p of snapshot.protocols) {
+    if (rankedSlugs.has(p.slug)) continue;
+    if (!isPreToken(p)) trading++;
+    else if (!isRankable(p)) excludedDerivative++;
+    else belowCut++;
+  }
   const radar: RadarData = {
     as_of: snapshot.as_of,
     source: snapshot.source,
@@ -575,7 +685,16 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
     early_size: early,
     live_size: live.length,
     global_multiple: round4(cal.globalMultiple),
+    global_low: round4(cal.globalLow),
+    global_high: round4(cal.globalHigh),
     global_peers: cal.globalPeers,
+    accounting: {
+      snapshot_protocols: snapshot.protocols.length,
+      ranked: board.length,
+      trading,
+      excluded_derivative: excludedDerivative,
+      below_cut: belowCut,
+    },
     board_tvl_usd: board.reduce((sum, r) => sum + r.tvl_usd, 0),
     median_implied_usd: impliedSorted.length > 0 ? impliedSorted[Math.floor(impliedSorted.length / 2)]! : 0,
     categories,

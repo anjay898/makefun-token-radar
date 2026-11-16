@@ -87,5 +87,6 @@ writeFileSync(join(out, 'dossier.json'), buildDossier(out, { text_max_bytes: TEX
 
 process.stdout.write(
   `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live set aside)\n` +
+    `token radar: census — ${radar.accounting.ranked} ranked, ${radar.accounting.trading} already trading, ${radar.accounting.excluded_derivative} set aside as derivative or versioned products, ${radar.accounting.below_cut} pre-token below the cut\n` +
     `token radar: global peer multiple ${radar.global_multiple}x from ${radar.global_peers} tokenized peers; wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} and ${join(out, 'dossier.json')}\n`,
 );

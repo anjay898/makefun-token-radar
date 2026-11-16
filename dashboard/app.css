@@ -32,11 +32,12 @@ button { cursor: pointer; }
 .brand { font-family: var(--mono); font-size: 13px; letter-spacing: 0.22em; font-weight: 700; }
 .brand em { color: var(--accent); font-style: normal; }
 .mast-note { font-family: var(--mono); font-size: 11.5px; color: var(--muted); text-align: right; }
-.title { font-family: var(--serif); font-size: 34px; line-height: 1.12; font-weight: 700; margin-top: 18px; }
+.title { font-family: var(--serif); font-size: 34px; line-height: 1.12; font-weight: 700; margin-top: 14px; }
 .subtitle { color: var(--muted); font-size: 15px; margin-top: 6px; max-width: 880px; }
 .subtitle strong { color: var(--ink); }
+.census { font-family: var(--mono); font-size: 12px; color: var(--muted); margin-top: 10px; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); padding: 7px 0; }
 
-.cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 18px; }
+.cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 14px; }
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; }
 .card .k { font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em; color: var(--muted); text-transform: uppercase; }
 .card .v { font-family: var(--mono); font-size: 22px; font-weight: 700; margin-top: 2px; font-variant-numeric: tabular-nums; }
@@ -79,6 +80,8 @@ tbody tr.selected { background: #f7ecdf; }
 .pos { color: var(--teal); }
 .neg { color: var(--negative); }
 .implied { color: var(--accent); font-weight: 700; }
+.ibar { height: 4px; background: #efece2; border-radius: 2px; margin-top: 4px; min-width: 64px; }
+.ibar i { display: block; height: 100%; background: var(--accent); border-radius: 2px; opacity: 0.55; }
 
 .pager { display: flex; gap: 8px; align-items: center; margin-top: 12px; }
 .pager button { border: 1px solid var(--border); background: var(--surface); border-radius: 8px; padding: 6px 14px; font-size: 13px; }
@@ -108,6 +111,7 @@ tbody tr.selected { background: #f7ecdf; }
 .drawer td.num { font-family: var(--mono); }
 .farm { margin: 0; padding-left: 20px; }
 .farm li { font-size: 13px; margin-bottom: 8px; }
+.plantotals { font-family: var(--mono); font-size: 12.5px; font-weight: 700; background: var(--canvas); border: 1px solid var(--border); border-left: 4px solid var(--teal); border-radius: var(--radius); padding: 10px 12px; }
 .whatif { background: var(--canvas); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; font-size: 12.5px; }
 .whatif label { display: block; font-family: var(--mono); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); margin-bottom: 4px; }
 .whatif input[type="range"] { width: 100%; }

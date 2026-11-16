@@ -10,7 +10,7 @@
   if (!DATA) return;
   var app = document.getElementById('board');
 
-  var state = { q: '', category: 'all', stage: 'all', chain: 'all', tier: 'all', tab: 'board', sort: 'implied', dir: -1, page: 0, selected: null };
+  var state = { q: '', category: 'all', stage: 'all', chain: 'all', tier: 'all', evidence: 'all', tab: 'board', sort: 'implied', dir: -1, page: 0, selected: null };
   function readHash() {
     var h = window.location.hash.replace(/^#/, '');
     if (!h) return;
@@ -24,6 +24,7 @@
       else if (k === 'stage') state.stage = v;
       else if (k === 'chain') state.chain = v;
       else if (k === 'tier') state.tier = v;
+      else if (k === 'ev') state.evidence = v;
       else if (k === 'q') state.q = v;
       else if (k === 'tab') state.tab = v;
     });
@@ -50,13 +51,29 @@
   function fmtMult(n) { return n.toFixed(2) + 'x'; }
 
   // The model in one function: the same arithmetic lib/model.ts runs, recomputed in the page from
-  // the row's snapshot figures and its calibrated category multiple.
+  // the row's snapshot figures and its calibrated anchor. Four factors only — the anchor the
+  // snapshot's tokenized peers set, momentum over seven days with its spike haircut, and a log
+  // maturity curve for time run with no token. For a category too thin to price itself (fewer
+  // than 4 peers) the row's category_multiple already IS the global multiple: model.ts stores
+  // the anchor that priced the row, so this recompute holds for every row alike.
   function impliedWith(row, growthPct) {
-    var g = growthPct === null || growthPct === undefined ? 0 : Math.min(120, Math.max(-60, growthPct));
+    var raw = growthPct === null || growthPct === undefined ? 0 : growthPct;
+    var g = Math.min(120, Math.max(-60, raw));
     var growthF = Math.exp(0.3 * Math.log1p(g / 100));
-    var spikeF = 1 - 0.15 * Math.min(1, Math.max(0, (g - 60) / 120));
+    // The haircut reads the RAW growth, as lib/model.ts does: it deepens from +60% to +180%
+    // and caps there, so a protocol up thousands of percent is haircut in full, not in half.
+    var spikeF = 1 - 0.15 * Math.min(1, Math.max(0, (raw - 60) / 120));
     var m = row.model;
-    return Math.max(1, Math.round(row.tvl_usd * m.category_multiple * growthF * m.maturity_factor * m.breadth_factor * m.data_factor * spikeF));
+    return Math.max(1, Math.round(row.tvl_usd * m.category_multiple * growthF * m.maturity_factor * spikeF));
+  }
+
+  // The resting recompute: the board's own arithmetic from the factors the row stores, with no
+  // re-derivation — this is the number the waterfall checks against the board, and it must land
+  // on the same dollar. impliedWith above is only for the what-if slider, where growth is the
+  // reader's own input and its factors are honestly recomputed.
+  function impliedStored(row) {
+    var m = row.model;
+    return Math.max(1, Math.round(row.tvl_usd * m.category_multiple * m.growth_factor * m.maturity_factor * m.spike_factor));
   }
 
   function el(tag, attrs) {
@@ -87,6 +104,17 @@
   ];
   function tierOf(id) { for (var i = 0; i < TIERS.length; i++) if (TIERS[i].id === id) return TIERS[i]; return TIERS[0]; }
 
+  // A log-scale bar for the implied cell: the board spans four orders of magnitude, so a linear
+  // bar would leave every row under the top few invisible. Width is the value's place between
+  // the board's smallest and largest implied values on a log10 scale, floored so it never vanishes.
+  var LOG_MIN = Math.log10(Math.max(1, Math.min.apply(null, DATA.rows.map(function (r) { return r.implied_value_usd; }))));
+  var LOG_MAX = Math.log10(Math.max.apply(null, DATA.rows.map(function (r) { return r.implied_value_usd; })));
+  function impliedBarPct(v) {
+    if (LOG_MAX <= LOG_MIN) return 100;
+    var pct = 6 + 94 * (Math.log10(Math.max(1, v)) - LOG_MIN) / (LOG_MAX - LOG_MIN);
+    return Math.max(6, Math.min(100, pct)).toFixed(1);
+  }
+
   function filtered() {
     var q = state.q.trim().toLowerCase();
     var tier = tierOf(state.tier);
@@ -95,6 +123,7 @@
       if (state.category !== 'all' && (r.category || 'Uncategorized') !== state.category) return false;
       if (state.stage !== 'all' && r.stage !== state.stage) return false;
       if (state.chain !== 'all' && r.chains.indexOf(state.chain) === -1) return false;
+      if (state.evidence !== 'all' && r.evidence !== state.evidence) return false;
       if (!tier.test(r)) return false;
       return true;
     });
@@ -142,7 +171,17 @@
       el('strong', { text: DATA.watchlist_size + ' watchlist candidates' }),
       ' at or above the ' + fmtUsd(DATA.floor_usd) + ' floor, plus ',
       el('strong', { text: DATA.early_size + ' early discoveries' }),
-      ' below it. Wrapped, staked, bridged and versioned products of tokens that already trade are excluded; tokenized protocols are never ranked — they calibrate the model and sit under Already trading.'));
+      ' the watchlist does not name — most below the floor, a few set aside by its rule. Wrapped, staked, bridged and versioned products of tokens that already trade are excluded; tokenized protocols are never ranked — they calibrate the model and sit under Already trading.'));
+
+    var ac = DATA.accounting;
+    var censusBits = [
+      ac.ranked + ' pre-token ranked below',
+      ac.trading + ' already trading (calibration only, never ranked)',
+      ac.excluded_derivative + ' set aside as wrapped, staked, bridged or versioned products',
+    ];
+    if (ac.below_cut > 0) censusBits.push(ac.below_cut + ' pre-token below the board\'s cut');
+    else censusBits.push('every other pre-token protocol is on the board');
+    shell.appendChild(el('p', { 'class': 'census', text: 'The whole snapshot, accounted for: all ' + ac.snapshot_protocols + ' protocols — ' + censusBits.join(' · ') + '.' }));
 
     var cards = el('div', { 'class': 'cards' });
     cards.appendChild(card('Board TVL', fmtUsd(DATA.board_tvl_usd), DATA.board_size + ' pre-token protocols ranked'));
@@ -152,18 +191,14 @@
     shell.appendChild(cards);
 
     var method = el('div', { 'class': 'method' });
-    method.appendChild(el('div', { 'class': 'formula', text: 'Implied value = TVL x Category anchor x Growth x Maturity x Chain breadth x Data coverage x Spike adjustment' }));
+    method.appendChild(el('div', { 'class': 'formula', text: 'Implied value = TVL x Anchor x Momentum x Maturity' }));
     method.appendChild(el('p', {},
-      el('strong', { text: 'Category anchor: ' }),
-      'the median market-cap/TVL of tokenized protocols in the same category, log-shrunk toward the global median (' + fmtMult(DATA.global_multiple) + ') with weight peers/(peers+12) and clamped to 0.03x-8x — learned from this snapshot, never a fixed 0.25x and never a list of names. ',
-      el('strong', { text: 'Growth ' }),
-      'rewards 7-day TVL momentum through exp(0.30 x log1p(g/100)), g clamped to -60%/+120%. ',
+      el('strong', { text: 'Anchor: ' }),
+      'the median market-cap/TVL of tokenized protocols in the same category, log-shrunk toward the global median (' + fmtMult(DATA.global_multiple) + ' across ' + DATA.global_peers + ' peers) with weight peers/(peers+12), clamped to 0.03x-8x — learned from this snapshot, never a fixed multiple and never a list of names. A category with fewer than 4 peers has no anchor of its own: the global median prices its rows exactly, and the row says so. ',
+      el('strong', { text: 'Momentum ' }),
+      'rewards 7-day TVL growth through exp(0.30 x log1p(g/100)), g clamped to -60%/+120%, and takes back up to 15% when growth passes +60% — the spike haircut. ',
       el('strong', { text: 'Maturity ' }),
-      'pays up to +25% for two years tracked with no token. ',
-      el('strong', { text: 'Spike adjustment ' }),
-      'takes back up to 15% when weekly growth passes +60%, and ',
-      el('strong', { text: 'Data coverage ' }),
-      'discounts 5% per missing input. Implied value is a circulating-cap proxy: it excludes supply, dilution and token rights, and predicts neither a launch nor an airdrop.'));
+      'adds up to +25% on a log curve over five years tracked with no token. What a record does not carry is never priced in: each missing input widens the row\'s peer range by a tenth and lowers its evidence grade instead. Implied value is a circulating-cap proxy: it excludes supply, dilution and token rights, and predicts neither a launch nor an airdrop.'));
     shell.appendChild(method);
 
     var tabs = el('div', { 'class': 'tabs' });
@@ -206,7 +241,8 @@
     bar.appendChild(selectOf('Stage', ['watchlist', 'early'], state.stage, function (v) { state.stage = v; }, { watchlist: 'Watchlist', early: 'Early' }));
     bar.appendChild(selectOf('Chain', chainList(), state.chain, function (v) { state.chain = v; }));
     bar.appendChild(selectOf('TVL tier', TIERS.map(function (t) { return t.id; }), state.tier, function (v) { state.tier = v; }, tierLabels()));
-    bar.appendChild(el('button', { 'class': 'clear', onclick: function () { state.q = ''; state.category = 'all'; state.stage = 'all'; state.chain = 'all'; state.tier = 'all'; state.page = 0; render(); }, text: 'Clear filters' }));
+    bar.appendChild(selectOf('Evidence', ['high', 'medium', 'low'], state.evidence, function (v) { state.evidence = v; }, { high: 'High', medium: 'Medium', low: 'Low' }));
+    bar.appendChild(el('button', { 'class': 'clear', onclick: function () { state.q = ''; state.category = 'all'; state.stage = 'all'; state.chain = 'all'; state.tier = 'all'; state.evidence = 'all'; state.page = 0; render(); }, text: 'Clear filters' }));
     wrap.appendChild(bar);
     var holder = el('div', { 'class': 'tableholder' });
     wrap.appendChild(holder);
@@ -243,6 +279,7 @@
     if (state.stage !== 'all') bits.push(state.stage === 'watchlist' ? 'Watchlist' : 'Early');
     if (state.chain !== 'all') bits.push(state.chain);
     if (state.tier !== 'all') bits.push(tierOf(state.tier).label);
+    if (state.evidence !== 'all') bits.push('evidence ' + state.evidence);
     if (state.q.trim()) bits.push('"' + state.q.trim() + '"');
     holder.appendChild(el('div', { 'class': 'countline' }, el('strong', { text: bits.join(' · ') }), ' — click a row for its detail and farm plan.'));
 
@@ -254,7 +291,7 @@
     head.appendChild(el('th', { text: 'Category' }));
     head.appendChild(thSort('TVL', 'tvl', true));
     head.appendChild(thSort('7d TVL', 'growth', true));
-    head.appendChild(thSort('Peer multiple', 'multiple', true));
+    head.appendChild(thSort('Anchor', 'multiple', true));
     head.appendChild(thSort('Implied value', 'implied', true));
     head.appendChild(el('th', { text: 'Evidence' }));
     head.appendChild(el('th', { 'class': 'num', text: 'Chains' }));
@@ -272,7 +309,13 @@
       if (r.change_7d !== null) pct.className += r.change_7d >= 0 ? ' pos' : ' neg';
       tr.appendChild(pct);
       tr.appendChild(el('td', { 'class': 'num', text: fmtMult(r.model.category_multiple) }));
-      tr.appendChild(el('td', { 'class': 'num implied', text: fmtUsd(r.implied_value_usd) }));
+      var impCell = el('td', { 'class': 'num implied' }, el('div', { text: fmtUsd(r.implied_value_usd) }));
+      var barTrack = el('div', { 'class': 'ibar' });
+      var fill = el('i', {});
+      fill.style.width = impliedBarPct(r.implied_value_usd) + '%';
+      barTrack.appendChild(fill);
+      impCell.appendChild(barTrack);
+      tr.appendChild(impCell);
       tr.appendChild(el('td', {}, el('span', { 'class': 'ev ' + r.evidence, text: r.evidence + ' · ' + r.model.category_peers + ' peers' })));
       tr.appendChild(el('td', { 'class': 'num', text: String(r.chains.length) }));
       tr.appendChild(el('td', { 'class': 'num', text: fmtAge(r.age_days) }));
@@ -338,6 +381,7 @@
     head.appendChild(el('th', { text: 'Category' }));
     head.appendChild(el('th', { 'class': 'num', text: 'Tokenized peers' }));
     head.appendChild(el('th', { 'class': 'num', text: 'Anchor multiple' }));
+    head.appendChild(el('th', { 'class': 'num', text: 'Peer range' }));
     table.appendChild(el('thead', {}, head));
     var body = el('tbody', {});
     DATA.categories.slice(0, 10).forEach(function (c) {
@@ -345,6 +389,7 @@
       tr.appendChild(el('td', { text: c.category }));
       tr.appendChild(el('td', { 'class': 'num', text: String(c.peers) }));
       tr.appendChild(el('td', { 'class': 'num', text: fmtMult(c.multiple) }));
+      tr.appendChild(el('td', { 'class': 'num', text: fmtMult(c.low) + ' – ' + fmtMult(c.high) }));
       body.appendChild(tr);
     });
     table.appendChild(body);
@@ -360,7 +405,8 @@
     [
       'Implied value is the entry\'s own model claim about a hypothetical launch — not a prediction that a token will be issued, or when.',
       'Evidence grades the inputs (peer count, missing fields), never the chance of an airdrop.',
-      'Protocols below the $50M floor and outside the watchlist can outrank watchlist rows when the model prices them higher; the watchlist is a floor, never a ceiling.',
+      'A category with fewer than four tokenized peers does not price its own rows: the global median does, the range is the global spread, and the evidence grade says the support is thin.',
+      'Protocols outside the watchlist — below the $50M floor, or set aside by the watchlist rule — can outrank watchlist rows when the model prices them higher; the watchlist is a floor, never a ceiling.',
       'Farm amounts are editable starting suggestions. Gas figures are low-fee-chain estimates, not quotes.',
     ].forEach(function (t) { ul.appendChild(el('li', { text: t })); });
     panel.appendChild(ul);
@@ -382,7 +428,7 @@
     var facts = el('table', {});
     var fb = el('tbody', {});
     [
-      ['Stage', row.stage === 'watchlist' ? 'Watchlist (TVL at or above the ' + fmtUsd(DATA.floor_usd) + ' floor)' : 'Early (below the floor, found by the radar)'],
+      ['Stage', row.stage === 'watchlist' ? 'Watchlist (TVL at or above the ' + fmtUsd(DATA.floor_usd) + ' floor)' : row.tvl_usd >= DATA.floor_usd ? 'Early (above the floor, but the watchlist rule does not name it)' : 'Early (below the floor, found by the radar)'],
       ['TVL', fmtUsd(row.tvl_usd)],
       ['7-day TVL change', fmtPct(row.change_7d)],
       ['Age with no token recorded', fmtAge(row.age_days) + (row.age_days !== null ? ' (' + row.age_days + ' days)' : '')],
@@ -401,15 +447,16 @@
     var wf = el('table', {});
     var wb = el('tbody', {});
     var m = row.model;
+    var anchorLabel = m.anchor_source === 'category'
+      ? 'x Category anchor (' + row.category + ', ' + m.category_peers + ' tokenized peers; global ' + fmtMult(m.global_multiple) + ')'
+      : 'x Global anchor (' + (row.category || 'uncategorized') + ' has ' + m.category_peers + ' tokenized peer' + (m.category_peers === 1 ? '' : 's') + ', under the 4-peer minimum — the global median prices this row)';
     [
       ['TVL (snapshot)', fmtUsd(row.tvl_usd)],
-      ['x Category anchor (' + (row.category || 'global') + ', ' + m.category_peers + ' peers, global ' + fmtMult(m.global_multiple) + ')', fmtMult(m.category_multiple)],
+      [anchorLabel, fmtMult(m.category_multiple)],
       ['x Growth (7d ' + fmtPct(row.change_7d) + ')', fmtMult(m.growth_factor)],
-      ['x Maturity (' + fmtAge(row.age_days) + ' with no token)', fmtMult(m.maturity_factor)],
-      ['x Chain breadth (' + row.chains.length + ' chains)', fmtMult(m.breadth_factor)],
-      ['x Data coverage', fmtMult(m.data_factor)],
       ['x Spike adjustment', fmtMult(m.spike_factor)],
-      ['= Implied value (page recomputes ' + fmtUsd(impliedWith(row, row.change_7d)) + ')', fmtUsd(row.implied_value_usd)],
+      ['x Maturity (' + fmtAge(row.age_days) + ' with no token, log curve)', fmtMult(m.maturity_factor)],
+      ['= Implied value (page recomputes ' + fmtUsd(impliedStored(row)) + ' from the stored factors)', fmtUsd(row.implied_value_usd)],
     ].forEach(function (pair) {
       var tr = el('tr', {});
       tr.appendChild(el('td', { text: pair[0] }));
@@ -418,6 +465,13 @@
     });
     wf.appendChild(wb);
     d.appendChild(wf);
+    var catStat = null;
+    DATA.categories.forEach(function (c) { if (c.category === row.category) catStat = c; });
+    var rangeNote = m.anchor_source === 'category' && catStat
+      ? 'The range above is ' + row.category + '\'s own peer dispersion: its tokenized peers price between ' + fmtMult(catStat.low) + ' and ' + fmtMult(catStat.high) + ' of TVL (quartiles, shrunk like the anchor).'
+      : 'The range above is the global peer dispersion: all ' + DATA.global_peers + ' tokenized peers price between ' + fmtMult(DATA.global_low) + ' and ' + fmtMult(DATA.global_high) + ' of TVL (quartiles).';
+    if (m.missing_inputs > 0) rangeNote += ' It is widened a tenth per missing input — this record does not carry ' + m.missing_inputs + ' of growth, listing day and chains.';
+    d.appendChild(el('p', { 'class': 'note', text: rangeNote }));
 
     var wi = el('div', { 'class': 'whatif' });
     wi.appendChild(el('label', { text: 'What-if: 7-day TVL growth', 'for': 'growthRange' }));
@@ -437,10 +491,12 @@
     d.appendChild(wi);
 
     d.appendChild(el('h3', { text: 'Farm plan' }));
+    d.appendChild(el('div', { 'class': 'plantotals', text: row.farm_summary }));
+    d.appendChild(el('p', { 'class': 'note', text: 'Shared by every plan on this page, so it is stated once here instead of spending a step on it: use a fresh wallet that holds only the funds you plan to farm, keep its seed phrase offline, and cap each allowance at the amount its step names.' }));
     var ol = el('ol', { 'class': 'farm' });
     row.farm_steps.forEach(function (s) { ol.appendChild(el('li', { text: s })); });
     d.appendChild(ol);
-    d.appendChild(el('p', { 'class': 'note', text: 'Amounts scale with this protocol\'s TVL tier and age in the generator (lib/model.ts farmSteps). No step promises points, eligibility or a reward.' }));
+    d.appendChild(el('p', { 'class': 'note', text: 'Amounts scale with this protocol\'s TVL tier and age in the generator (lib/model.ts farmSteps), and one step is the judgment its own record calls for — its seven-day growth, its age, its category\'s peer count. No step promises points, eligibility or a reward.' }));
 
     frag.appendChild(d);
     return frag;
